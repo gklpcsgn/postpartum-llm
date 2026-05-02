@@ -1,0 +1,62 @@
+{
+  "builder_name": "json",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "json",
+  "dataset_size": 2421058,
+  "description": "",
+  "download_checksums": {
+    "/home/gokalp/research/postpartum-llm/data/datasets/merged_splits/train.jsonl": {
+      "num_bytes": 2303445,
+      "checksum": null
+    },
+    "/home/gokalp/research/postpartum-llm/data/datasets/merged_splits/val.jsonl": {
+      "num_bytes": 288178,
+      "checksum": null
+    },
+    "/home/gokalp/research/postpartum-llm/data/datasets/merged_splits/test.jsonl": {
+      "num_bytes": 290057,
+      "checksum": null
+    }
+  },
+  "download_size": 2881680,
+  "features": {
+    "text": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "label": {
+      "dtype": "int64",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 5302738,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 1934985,
+      "num_examples": 5414,
+      "dataset_name": "json"
+    },
+    "validation": {
+      "name": "validation",
+      "num_bytes": 242160,
+      "num_examples": 676,
+      "dataset_name": "json"
+    },
+    "test": {
+      "name": "test",
+      "num_bytes": 243913,
+      "num_examples": 678,
+      "dataset_name": "json"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}

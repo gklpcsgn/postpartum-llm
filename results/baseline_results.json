@@ -1,0 +1,17 @@
+
+{
+  "model_dir": "scripts/outputs/llama31_8b_postpartum_qlora",
+  "n_examples": 679,
+  "exact_match": 0.0,
+  "f1": 0.27865462083612125,
+  "rouge1": 0.311662941771193,
+  "rouge2": 0.10289940515566076,
+  "rougeL": 0.23569025067694183,
+  "bleu": 0.04305303014885652,
+  "bertscore_precision": 0.8996882438659668,
+  "bertscore_recall": 0.8808392286300659,
+  "bertscore_f1": 0.8900187015533447,
+  "avg_pred_len": 25.620029455081003,
+  "avg_gold_len": 37.369661266568485,
+  "length_ratio": 0.6855836683219043
+}

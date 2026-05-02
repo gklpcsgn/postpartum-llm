@@ -1,0 +1,9 @@
+              precision    recall  f1-score   support
+
+       green      0.962     0.786     0.865       519
+      yellow      0.539     0.880     0.668       150
+         red      0.571     0.571     0.571         7
+
+    accuracy                          0.805       676
+   macro avg      0.691     0.746     0.702       676
+weighted avg      0.864     0.805     0.819       676

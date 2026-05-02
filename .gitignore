@@ -1,0 +1,26 @@
+# Virtual environment
+.venv/
+
+# Model weights
+models/**/*.safetensors
+models/**/*.pt
+models/**/rng_state.pth
+
+# Book PDFs and chunks
+data/books/
+
+# HuggingFace dataset cache
+data/severity/**/*.arrow
+
+# Large data files
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Logs
+*.log
+models/**/checkpoint-*/
