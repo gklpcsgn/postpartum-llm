@@ -38,9 +38,8 @@ def build_prompt(instr: str, inp: str | None) -> str:
 LABELS = ["green", "yellow", "red"]
 IDX_RED = LABELS.index("red")
 
-# thresholds for treating something as "red" based on probability
-INPUT_RED_THRESH = 0.20   
-OUTPUT_RED_THRESH = 0.20  
+# threshold for treating a conversation as "red" based on p(red)
+CONV_RED_THRESH = 0.20
 
 MENTAL_HEALTH_PATTERNS = [
     "thoughts of hurting myself",
@@ -73,6 +72,10 @@ def rule_based_red(text: str) -> bool:
         if p in t:
             return True
     return False
+
+
+def build_conversation_text(user_msg: str, draft: str) -> str:
+    return f"User: {user_msg}\nDraft: {draft}"
 
 
 def load_severity_model(path: Path, device: str):
@@ -162,55 +165,25 @@ def chat_turn(
     user_msg: str,
     lm_tokenizer,
     lm_model,
-    tok_in,
-    sev_model_in,
-    tok_out,
-    sev_model_out,
+    tok_conv,
+    sev_model_conv,
     device: str,
     max_new_tokens: int = 256,
 ):
     instr = user_msg
-    inp = ""  # can be extended later
+    inp = ""
 
-    # === INPUT SIDE ===
-    input_text_for_sev = instr  # if inp: instr + "\n\n" + inp
-
-    # 1) hard rules first
-    if rule_based_red(input_text_for_sev):
-        input_severity = "red"
-        input_p_red = 1.0
-    else:
-        # 2) classifier + probability threshold
-        in_label, in_probs = predict_label_and_probs(
-            tok_in, sev_model_in, input_text_for_sev, device
-        )
-        input_p_red = in_probs[IDX_RED]
-        if input_p_red >= INPUT_RED_THRESH:
-            input_severity = "red"
-        else:
-            input_severity = in_label
-
-    # 3) hard gate for red input
-    if input_severity == "red":
-        answer = CRISIS_MESSAGE
-        # classify answer mainly for logging
-        out_label, out_probs = predict_label_and_probs(
-            tok_out, sev_model_out, answer, device
-        )
-        answer_severity = out_label
-        answer_p_red = out_probs[IDX_RED]
-
+    # 1) Hard rules on user message — block before generating
+    if rule_based_red(instr):
         return {
-            "input_severity": input_severity,
-            "input_p_red": input_p_red,
-            "answer": answer,
-            "answer_severity": answer_severity,
-            "answer_p_red": answer_p_red,
+            "conv_severity": "red",
+            "conv_p_red": 1.0,
+            "answer": CRISIS_MESSAGE,
             "blocked_for_red_input": True,
             "overridden_for_red_output": False,
         }
 
-    # === NORMAL GENERATION ===
+    # 2) Generate draft response
     answer = generate_answer(
         lm_tokenizer=lm_tokenizer,
         lm_model=lm_model,
@@ -220,28 +193,29 @@ def chat_turn(
         max_new_tokens=max_new_tokens,
     )
 
-    # === OUTPUT SIDE ===
-    out_label, out_probs = predict_label_and_probs(
-        tok_out, sev_model_out, answer, device
-    )
-    answer_p_red = out_probs[IDX_RED]
-
-    # hard rules on output
-    overridden_for_red_output = False
-    if rule_based_red(answer) or answer_p_red >= OUTPUT_RED_THRESH or out_label == "red":
-        # override the answer text with crisis-safe message
-        answer = CRISIS_MESSAGE
-        overridden_for_red_output = True
-        answer_severity = "red"
+    # 3) Classify the full conversation (user message + draft)
+    if rule_based_red(answer):
+        conv_severity = "red"
+        conv_p_red = 1.0
     else:
-        answer_severity = out_label
+        conv_text = build_conversation_text(instr, answer)
+        conv_label, conv_probs = predict_label_and_probs(
+            tok_conv, sev_model_conv, conv_text, device
+        )
+        conv_p_red = conv_probs[IDX_RED]
+        if conv_p_red >= CONV_RED_THRESH or conv_label == "red":
+            conv_severity = "red"
+        else:
+            conv_severity = conv_label
+
+    overridden_for_red_output = conv_severity == "red"
+    if overridden_for_red_output:
+        answer = CRISIS_MESSAGE
 
     return {
-        "input_severity": input_severity,
-        "input_p_red": input_p_red,
+        "conv_severity": conv_severity,
+        "conv_p_red": conv_p_red,
         "answer": answer,
-        "answer_severity": answer_severity,
-        "answer_p_red": answer_p_red,
         "blocked_for_red_input": False,
         "overridden_for_red_output": overridden_for_red_output,
     }
@@ -266,15 +240,13 @@ if __name__ == "__main__":
     print("Device:", device)
 
     this_file = Path(__file__).resolve()
-    repo_root = this_file.parent.parent
+    repo_root = this_file.parent.parent.parent
 
     llm_dir = repo_root / "scripts" / "outputs" / "llama31_8b_postpartum_qlora"
-    sev_input_dir = repo_root / "models" / "severity_input"
-    sev_output_dir = repo_root / "models" / "severity_output"
+    sev_conv_dir = repo_root / "models" / "classifiers" / "severity_conversation"
 
     lm_tokenizer, lm_model = load_main_model(llm_dir, device)
-    tok_in, sev_model_in = load_severity_model(sev_input_dir, device)
-    tok_out, sev_model_out = load_severity_model(sev_output_dir, device)
+    tok_conv, sev_model_conv = load_severity_model(sev_conv_dir, device)
 
     print("Interactive postpartum assistant with severity guard")
     print("Type 'exit' or 'quit' to stop.\n")
@@ -297,18 +269,15 @@ if __name__ == "__main__":
             user_msg=user_msg,
             lm_tokenizer=lm_tokenizer,
             lm_model=lm_model,
-            tok_in=tok_in,
-            sev_model_in=sev_model_in,
-            tok_out=tok_out,
-            sev_model_out=sev_model_out,
+            tok_conv=tok_conv,
+            sev_model_conv=sev_model_conv,
             device=device,
             max_new_tokens=args.max_new_tokens,
         )
 
         prefix = (
-            f"[in={result['input_severity']} (p_red={result['input_p_red']:.2f}), "
-            f"out={result['answer_severity']} (p_red={result['answer_p_red']:.2f}), "
+            f"[severity={result['conv_severity']} (p_red={result['conv_p_red']:.2f}), "
             f"blocked_in={result['blocked_for_red_input']}, "
-            f"overridden_out={result['overridden_for_red_output']}]"
+            f"overridden={result['overridden_for_red_output']}]"
         )
         print(f"{prefix}\nAssistant: {result['answer']}\n")

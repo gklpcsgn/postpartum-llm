@@ -1,0 +1,48 @@
+{
+  "checkpoint": "models/classifiers/severity_output",
+  "dataset_path": "data/severity/severity_dataset_output",
+  "split": "test",
+  "thresholds": [
+    {
+      "threshold": 0.1,
+      "red_precision": 0.14814814814814814,
+      "red_recall": 0.6666666666666666,
+      "red_f1": 0.24242424242424243,
+      "false_alarm_rate": 0.03422619047619048,
+      "accuracy": 0.7728613569321534
+    },
+    {
+      "threshold": 0.15,
+      "red_precision": 0.16666666666666666,
+      "red_recall": 0.6666666666666666,
+      "red_f1": 0.26666666666666666,
+      "false_alarm_rate": 0.02976190476190476,
+      "accuracy": 0.7772861356932154
+    },
+    {
+      "threshold": 0.2,
+      "red_precision": 0.2,
+      "red_recall": 0.6666666666666666,
+      "red_f1": 0.30769230769230765,
+      "false_alarm_rate": 0.023809523809523808,
+      "accuracy": 0.7831858407079646
+    },
+    {
+      "threshold": 0.25,
+      "red_precision": 0.2857142857142857,
+      "red_recall": 0.6666666666666666,
+      "red_f1": 0.4,
+      "false_alarm_rate": 0.01488095238095238,
+      "accuracy": 0.7890855457227138
+    },
+    {
+      "threshold": 0.3,
+      "red_precision": 0.36363636363636365,
+      "red_recall": 0.6666666666666666,
+      "red_f1": 0.4705882352941177,
+      "false_alarm_rate": 0.010416666666666666,
+      "accuracy": 0.7920353982300885
+    }
+  ],
+  "precision_at_90_recall": 0.15
+}

@@ -3,12 +3,14 @@ import json
 from pathlib import Path
 import time
 
-
+from dotenv import load_dotenv
 from openai import OpenAI
 
-# Set your API key in the environment:
-# export OPENAI_API_KEY="sk-..."
-client = OpenAI(api_key="")
+load_dotenv()
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise EnvironmentError("OPENAI_API_KEY is not set. Add it to your .env file.")
+client = OpenAI(api_key=api_key)
 def build_messages(chunk_text: str):
     """
     Build messages for the chat completion call.

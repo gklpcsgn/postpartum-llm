@@ -1,45 +1,82 @@
-# scripts/build_severity_datasets.py
+# scripts/data/build_severity_datasets.py
 
-from datasets import load_dataset, DatasetDict
+import json
+from pathlib import Path
 
-data_files = {
-    "train": "data/datasets/merged_splits/train.jsonl",
-    "validation": "data/datasets/merged_splits/val.jsonl",
-    "test": "data/datasets/merged_splits/test.jsonl",
-}
-
-raw = load_dataset("json", data_files=data_files)
+from datasets import Dataset, DatasetDict
 
 LABELS = ["green", "yellow", "red"]
 label2id = {l: i for i, l in enumerate(LABELS)}
-id2label = {i: l for l, i in label2id.items()}
 
-def build_input_example(ex):
-    # user side
-    text = ex["instruction"] or ""
-    if ex.get("input"):
-        text = text + "\n\n" + ex["input"]
-    return {
-        "text": text,
-        "label": label2id[ex["severity"]],
-    }
+SPLITS_DIR = Path("data/original/merged_splits")
+AUGMENTED_DIR = Path("data/augmented")
 
-def build_output_example(ex):
-    # assistant side
-    return {
-        "text": ex["output"],
-        "label": label2id[ex["severity"]],
-    }
 
-input_ds = DatasetDict({
-    split: raw[split].map(build_input_example, remove_columns=raw[split].column_names)
-    for split in raw
+def load_jsonl(path: Path) -> list[dict]:
+    examples = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                examples.append(json.loads(line))
+    return examples
+
+
+def build_conversation_text(ex: dict) -> str:
+    """
+    Format a training example as a conversation string.
+
+    Edinburgh-style examples (instruction starts with 'A:') are kept as-is.
+    Regular QA examples are formatted as:
+        User: <instruction>
+        A: <input>        (omitted when input is empty)
+        Draft: <output>   (omitted when output is empty)
+    """
+    instruction = ex.get("instruction") or ""
+    inp = ex.get("input") or ""
+    output = ex.get("output") or ""
+    if instruction.startswith("A:"):
+        return instruction
+    parts = [f"User: {instruction}"]
+    if inp:
+        parts.append(f"A: {inp}")
+    if output:
+        parts.append(f"Draft: {output}")
+    return "\n".join(parts)
+
+
+def to_hf_dict(examples: list[dict]) -> dict:
+    texts, labels = [], []
+    for ex in examples:
+        if ex.get("severity") not in label2id:
+            continue
+        texts.append(build_conversation_text(ex))
+        labels.append(label2id[ex["severity"]])
+    return {"text": texts, "label": labels}
+
+
+# Train: merged_splits/train + all .jsonl files under data/augmented/
+train_examples = load_jsonl(SPLITS_DIR / "train.jsonl")
+print(f"Loaded train split: {len(train_examples)} examples")
+
+if AUGMENTED_DIR.is_dir():
+    for jsonl_file in sorted(AUGMENTED_DIR.glob("*.jsonl")):
+        extra = load_jsonl(jsonl_file)
+        train_examples.extend(extra)
+        print(f"Loaded augmented: {jsonl_file} ({len(extra)} examples)")
+else:
+    print(f"No augmented dir found at {AUGMENTED_DIR}, skipping.")
+
+val_examples = load_jsonl(SPLITS_DIR / "val.jsonl")
+test_examples = load_jsonl(SPLITS_DIR / "test.jsonl")
+print(f"Loaded val: {len(val_examples)}, test: {len(test_examples)} examples")
+
+conv_ds = DatasetDict({
+    "train": Dataset.from_dict(to_hf_dict(train_examples)),
+    "validation": Dataset.from_dict(to_hf_dict(val_examples)),
+    "test": Dataset.from_dict(to_hf_dict(test_examples)),
 })
 
-output_ds = DatasetDict({
-    split: raw[split].map(build_output_example, remove_columns=raw[split].column_names)
-    for split in raw
-})
-
-input_ds.save_to_disk("severity_dataset_input")
-output_ds.save_to_disk("severity_dataset_output")
+conv_ds.save_to_disk("severity_dataset_conversation")
+print(f"\nSaved to severity_dataset_conversation")
+print(conv_ds)

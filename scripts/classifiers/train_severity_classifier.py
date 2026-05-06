@@ -1,5 +1,6 @@
-# scripts/train_severity_classifier.py
+# scripts/classifiers/train_severity_classifier.py
 
+import argparse
 import os
 import json
 from collections import Counter
@@ -9,7 +10,8 @@ import matplotlib.pyplot as plt
 import torch
 from torch.nn import CrossEntropyLoss
 
-from datasets import load_from_disk
+from datasets import Dataset, DatasetDict
+from pathlib import Path
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
@@ -19,13 +21,16 @@ from transformers import (
     EarlyStoppingCallback,
 )
 from evaluate import load as load_metric
-from sklearn.metrics import classification_report 
+from sklearn.metrics import (
+    classification_report,
+    average_precision_score,
+    matthews_corrcoef,
+)
+from sklearn.preprocessing import label_binarize
 
 LABELS = ["green", "yellow", "red"]
 label2id = {l: i for i, l in enumerate(LABELS)}
 id2label = {i: l for l, i in label2id.items()}
-
-MODEL_NAME = "distilbert-base-uncased"
 
 
 class WeightedTrainer(Trainer):
@@ -45,25 +50,162 @@ class WeightedTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
 
-def train(dataset_path: str, output_dir: str):
-    ds = load_from_disk(dataset_path)
+class AsymmetricLossTrainer(Trainer):
+    """Standard CE + differentiable penalty on red false negatives only.
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    For each example where the true label is red (2), adds alpha*(1 - p_red)
+    to the loss, pushing the model to assign higher probability to class 2.
+    Non-red examples receive no extra penalty.
+    """
+
+    def __init__(self, alpha: float, num_labels: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.alpha = alpha
+        self.num_labels = num_labels
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+        loss_fct = CrossEntropyLoss()
+        ce_loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+
+        probs = torch.softmax(logits, dim=-1)
+        red_mask = (labels == 2).float()
+        prob_red = probs[:, 2]
+        asymm_penalty = self.alpha * (red_mask * (1.0 - prob_red)).mean()
+
+        loss = ce_loss + asymm_penalty
+        return (loss, outputs) if return_outputs else loss
+
+
+class FocalLossTrainer(Trainer):
+    """Focal loss, optionally combined with class weighting via --focal_with_weights."""
+
+    def __init__(
+        self,
+        gamma: float,
+        num_labels: int,
+        class_weights: torch.Tensor | None = None,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.gamma = gamma
+        self.num_labels = num_labels
+        self.class_weights = class_weights
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+        ce_fct = CrossEntropyLoss(
+            weight=self.class_weights.to(logits.device) if self.class_weights is not None else None,
+            reduction="none",
+        )
+        ce_per = ce_fct(logits.view(-1, self.num_labels), labels.view(-1))
+
+        probs = torch.softmax(logits, dim=-1)
+        p_t = probs.gather(1, labels.view(-1, 1)).squeeze(1)
+        focal_weight = (1.0 - p_t) ** self.gamma
+
+        loss = (focal_weight * ce_per).mean()
+        return (loss, outputs) if return_outputs else loss
+
+
+def _softmax_np(logits: np.ndarray) -> np.ndarray:
+    shifted = logits - logits.max(axis=-1, keepdims=True)
+    exp = np.exp(shifted)
+    return exp / exp.sum(axis=-1, keepdims=True)
+
+
+def build_conversation_text(ex: dict) -> str:
+    instruction = ex.get("instruction") or ""
+    inp = ex.get("input") or ""
+    output = ex.get("output") or ""
+    if instruction.startswith("A:"):
+        return instruction
+    parts = [f"User: {instruction}"]
+    if inp:
+        parts.append(f"A: {inp}")
+    if output:
+        parts.append(f"Draft: {output}")
+    return "\n".join(parts)
+
+
+def load_jsonl(path) -> list[dict]:
+    examples = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                examples.append(json.loads(line))
+    return examples
+
+
+def build_dataset(splits_dir: str, augmented_dir: str | None) -> DatasetDict:
+    splits_path = Path(splits_dir)
+    train_examples = load_jsonl(splits_path / "train.jsonl")
+    print(f"Loaded train split: {len(train_examples)} examples")
+
+    if augmented_dir:
+        aug_path = Path(augmented_dir)
+        if aug_path.is_dir():
+            for jsonl_file in sorted(aug_path.glob("*.jsonl")):
+                extra = load_jsonl(jsonl_file)
+                train_examples.extend(extra)
+                print(f"Loaded augmented: {jsonl_file} ({len(extra)} examples)")
+        else:
+            print(f"Warning: augmented_dir {augmented_dir!r} not found, skipping.")
+
+    val_examples = load_jsonl(splits_path / "val.jsonl")
+    test_examples = load_jsonl(splits_path / "test.jsonl")
+
+    def to_hf_dict(examples: list[dict]) -> dict:
+        texts, labels = [], []
+        for ex in examples:
+            if ex.get("severity") not in label2id:
+                continue
+            texts.append(build_conversation_text(ex))
+            labels.append(label2id[ex["severity"]])
+        return {"text": texts, "labels": labels}
+
+    return DatasetDict({
+        "train": Dataset.from_dict(to_hf_dict(train_examples)),
+        "validation": Dataset.from_dict(to_hf_dict(val_examples)),
+        "test": Dataset.from_dict(to_hf_dict(test_examples)),
+    })
+
+
+def train(
+    dataset_path: str,
+    output_dir: str,
+    model_name: str = "distilbert-base-uncased",
+    lr: float = 2e-5,
+    train_batch_size: int = 16,
+    eval_batch_size: int = 32,
+    num_epochs: int = 8,
+    loss_type: str = "weighted_ce",
+    alpha: float = 1.0,
+    gamma: float = 2.0,
+    focal_with_weights: bool = False,
+    augmented_dir: str | None = None,
+):
+    ds = build_dataset(dataset_path, augmented_dir)
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     def tokenize(batch):
         return tokenizer(
             batch["text"],
             truncation=True,
             padding=False,
-            max_length=256,
+            max_length=512,
         )
 
-    tokenized = ds.map(tokenize, batched=True)
-
-    # make labels explicit for Trainer
-    if "label" in tokenized["train"].column_names:
-        tokenized = tokenized.rename_column("label", "labels")
-
+    tokenized = ds.map(tokenize, batched=True, remove_columns=["text"])
     tokenized.set_format(
         type="torch",
         columns=["input_ids", "attention_mask", "labels"],
@@ -71,20 +213,30 @@ def train(dataset_path: str, output_dir: str):
 
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
-    accuracy = load_metric("accuracy")
-    f1 = load_metric("f1")
+    accuracy_metric = load_metric("accuracy")
+    f1_metric = load_metric("f1")
+    num_labels = len(LABELS)
 
     def compute_metrics(eval_pred):
         logits, labels = eval_pred
         preds = np.argmax(logits, axis=-1)
+
+        probs = _softmax_np(logits)
+        labels_bin = label_binarize(labels, classes=list(range(num_labels)))
+        auprc_per_class = average_precision_score(labels_bin, probs, average=None)
+
         return {
-            "accuracy": accuracy.compute(predictions=preds, references=labels)["accuracy"],
-            "f1_macro": f1.compute(predictions=preds, references=labels, average="macro")["f1"],
+            "accuracy": accuracy_metric.compute(predictions=preds, references=labels)["accuracy"],
+            "f1_macro": f1_metric.compute(predictions=preds, references=labels, average="macro")["f1"],
+            "auprc_green": float(auprc_per_class[0]),
+            "auprc_yellow": float(auprc_per_class[1]),
+            "auprc_red": float(auprc_per_class[2]),
+            "mcc": float(matthews_corrcoef(labels, preds)),
         }
 
     model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_NAME,
-        num_labels=len(LABELS),
+        model_name,
+        num_labels=num_labels,
         id2label=id2label,
         label2id=label2id,
     )
@@ -92,9 +244,8 @@ def train(dataset_path: str, output_dir: str):
     os.makedirs(output_dir, exist_ok=True)
 
     # class weights from train split
-    train_labels_raw = ds["train"]["label"]
+    train_labels_raw = ds["train"]["labels"]
     counts = Counter(train_labels_raw)
-    num_labels = len(LABELS)
     total = len(train_labels_raw)
     weights = []
     for i in range(num_labels):
@@ -102,15 +253,15 @@ def train(dataset_path: str, output_dir: str):
         weights.append(1.0 / freq)
     class_weights = torch.tensor(weights, dtype=torch.float)
 
-    args = TrainingArguments(
+    training_args = TrainingArguments(
         output_dir=output_dir,
         eval_strategy="epoch",
         save_strategy="epoch",
         logging_strategy="epoch",
-        learning_rate=2e-5,
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=32,
-        num_train_epochs=8,
+        learning_rate=lr,
+        per_device_train_batch_size=train_batch_size,
+        per_device_eval_batch_size=eval_batch_size,
+        num_train_epochs=num_epochs,
         weight_decay=0.01,
         load_best_model_at_end=True,
         metric_for_best_model="f1_macro",
@@ -118,11 +269,9 @@ def train(dataset_path: str, output_dir: str):
         report_to="none",
     )
 
-    trainer = WeightedTrainer(
-        class_weights=class_weights,
-        num_labels=num_labels,
+    common_kwargs = dict(
         model=model,
-        args=args,
+        args=training_args,
         train_dataset=tokenized["train"],
         eval_dataset=tokenized["validation"],
         tokenizer=tokenizer,
@@ -135,6 +284,28 @@ def train(dataset_path: str, output_dir: str):
             )
         ],
     )
+
+    if loss_type == "weighted_ce":
+        trainer = WeightedTrainer(
+            class_weights=class_weights,
+            num_labels=num_labels,
+            **common_kwargs,
+        )
+    elif loss_type == "asymmetric":
+        trainer = AsymmetricLossTrainer(
+            alpha=alpha,
+            num_labels=num_labels,
+            **common_kwargs,
+        )
+    elif loss_type == "focal":
+        trainer = FocalLossTrainer(
+            gamma=gamma,
+            num_labels=num_labels,
+            class_weights=class_weights if focal_with_weights else None,
+            **common_kwargs,
+        )
+    else:
+        raise ValueError(f"Unknown loss_type: {loss_type}")
 
     trainer.train()
 
@@ -220,7 +391,6 @@ def train(dataset_path: str, output_dir: str):
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(report)
 
-    # validation + test per-class metrics
     save_class_report("validation")
     save_class_report("test")
 
@@ -229,8 +399,49 @@ def train(dataset_path: str, output_dir: str):
 
 
 if __name__ == "__main__":
-    # 1) train input severity model
-    train("severity_dataset_input", "models/severity_input")
+    parser = argparse.ArgumentParser(description="Train severity classifier")
+    parser.add_argument("--model_name", default="distilbert-base-uncased")
+    parser.add_argument("--dataset_path", required=True,
+                        help="Path to merged_splits directory containing train/val/test.jsonl")
+    parser.add_argument("--augmented_dir", default="data/augmented",
+                        help="Directory of extra .jsonl files merged into train (default: data/augmented)")
+    parser.add_argument("--output_dir", default="models/classifiers/severity_conversation/",
+                        help="Where to save checkpoints and artifacts")
+    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--train_batch_size", type=int, default=16)
+    parser.add_argument("--eval_batch_size", type=int, default=32)
+    parser.add_argument("--num_epochs", type=int, default=8)
+    parser.add_argument(
+        "--loss_type",
+        choices=["weighted_ce", "asymmetric", "focal"],
+        default="weighted_ce",
+        help="Loss function: weighted_ce (default), asymmetric, or focal",
+    )
+    parser.add_argument(
+        "--alpha", type=float, default=1.0,
+        help="Penalty weight for red false negatives (asymmetric loss only)",
+    )
+    parser.add_argument(
+        "--gamma", type=float, default=2.0,
+        help="Focusing parameter for focal loss",
+    )
+    parser.add_argument(
+        "--focal_with_weights", action="store_true",
+        help="Combine focal loss with inverse-frequency class weighting",
+    )
+    args = parser.parse_args()
 
-    # 2) train output severity model (comment out if you want to run separately)
-    train("severity_dataset_output", "models/severity_output")
+    train(
+        dataset_path=args.dataset_path,
+        output_dir=args.output_dir,
+        model_name=args.model_name,
+        lr=args.lr,
+        train_batch_size=args.train_batch_size,
+        eval_batch_size=args.eval_batch_size,
+        num_epochs=args.num_epochs,
+        loss_type=args.loss_type,
+        alpha=args.alpha,
+        gamma=args.gamma,
+        focal_with_weights=args.focal_with_weights,
+        augmented_dir=args.augmented_dir,
+    )
