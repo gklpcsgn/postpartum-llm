@@ -308,11 +308,8 @@ def train(
         plt.savefig(os.path.join(output_dir, "val_metrics_curve.png"), dpi=300)
         plt.close()
 
-    # final eval on test (for overall numbers)
-    trainer.evaluate(tokenized["test"])
-
     # === per-class reports ===
-    def save_class_report(split_name: str):
+    def save_class_report(split_name: str) -> tuple[np.ndarray, np.ndarray]:
         preds_output = trainer.predict(tokenized[split_name])
         logits = preds_output.predictions
         preds = np.argmax(logits, axis=-1)
@@ -332,11 +329,57 @@ def train(
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(report)
 
+        return preds, labels
+
     save_class_report("validation")
-    save_class_report("test")
+    test_preds, test_labels = save_class_report("test")
 
     trainer.save_model(output_dir)
     tokenizer.save_pretrained(output_dir)
+
+    # === results summary ===
+    best_epoch = None
+    best_f1 = -1.0
+    for record in log_history:
+        if "eval_f1_macro" in record and record["eval_f1_macro"] > best_f1:
+            best_f1 = record["eval_f1_macro"]
+            best_epoch = record.get("epoch")
+
+    report_dict = classification_report(
+        test_labels,
+        test_preds,
+        target_names=LABELS,
+        zero_division=0,
+        output_dict=True,
+    )
+
+    summary = {
+        "model_name": model_name,
+        "loss_type": loss_type,
+        "alpha": alpha if loss_type == "asymmetric" else None,
+        "gamma": gamma if loss_type == "focal" else None,
+        "focal_with_weights": focal_with_weights if loss_type == "focal" else False,
+        "best_epoch": best_epoch,
+        "test_accuracy": report_dict["accuracy"],
+        "test_macro_f1": report_dict["macro avg"]["f1-score"],
+        "test_macro_precision": report_dict["macro avg"]["precision"],
+        "test_macro_recall": report_dict["macro avg"]["recall"],
+        "test_mcc": float(matthews_corrcoef(test_labels, test_preds)),
+        "test_red_precision": report_dict["red"]["precision"],
+        "test_red_recall": report_dict["red"]["recall"],
+        "test_red_f1": report_dict["red"]["f1-score"],
+        "test_green_precision": report_dict["green"]["precision"],
+        "test_green_recall": report_dict["green"]["recall"],
+        "test_green_f1": report_dict["green"]["f1-score"],
+        "test_yellow_precision": report_dict["yellow"]["precision"],
+        "test_yellow_recall": report_dict["yellow"]["recall"],
+        "test_yellow_f1": report_dict["yellow"]["f1-score"],
+    }
+
+    summary_path = os.path.join(output_dir, "results_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    print(f"\nSaved results summary to {summary_path}")
 
 
 if __name__ == "__main__":
