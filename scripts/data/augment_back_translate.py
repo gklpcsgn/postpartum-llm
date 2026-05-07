@@ -23,7 +23,7 @@ import re
 import time
 from pathlib import Path
 
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
@@ -60,11 +60,11 @@ def load_red_examples(path: Path) -> list[dict]:
     return examples
 
 
-def back_translate(model, text: str, language: str, retries: int = 3) -> str | None:
+def back_translate(client, model_name: str, text: str, language: str, retries: int = 3) -> str | None:
     prompt = BACK_TRANSLATE_PROMPT.format(language=language, text=text)
     for attempt in range(retries):
         try:
-            response = model.generate_content(prompt)
+            response = client.models.generate_content(model=model_name, contents=prompt)
             result = response.text.strip()
             # Basic sanity: result should be non-empty and different from input
             if result and result.lower() != text.lower():
@@ -108,8 +108,7 @@ def main():
     parser.add_argument("--rpm",        type=int, default=15, help="Max requests per minute")
     args = parser.parse_args()
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(model_name=args.model)
+    client = genai.Client(api_key=api_key)
 
     input_path = Path(args.input)
     output_path = Path(args.output)
@@ -144,7 +143,7 @@ def main():
                     continue
 
                 print(f"[{total_written}/{total_target}] Example {i+1}/{len(red_examples)} · {language}...")
-                translated = back_translate(model, src_instruction, language)
+                translated = back_translate(client, args.model, src_instruction, language)
 
                 if translated:
                     new_example = {

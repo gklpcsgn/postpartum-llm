@@ -10,8 +10,7 @@ import matplotlib.pyplot as plt
 import torch
 from torch.nn import CrossEntropyLoss
 
-from datasets import Dataset, DatasetDict
-from pathlib import Path
+from datasets import load_from_disk
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
@@ -121,64 +120,6 @@ def _softmax_np(logits: np.ndarray) -> np.ndarray:
     return exp / exp.sum(axis=-1, keepdims=True)
 
 
-def build_conversation_text(ex: dict) -> str:
-    instruction = ex.get("instruction") or ""
-    inp = ex.get("input") or ""
-    output = ex.get("output") or ""
-    if instruction.startswith("A:"):
-        return instruction
-    parts = [f"User: {instruction}"]
-    if inp:
-        parts.append(f"A: {inp}")
-    if output:
-        parts.append(f"Draft: {output}")
-    return "\n".join(parts)
-
-
-def load_jsonl(path) -> list[dict]:
-    examples = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                examples.append(json.loads(line))
-    return examples
-
-
-def build_dataset(splits_dir: str, augmented_dir: str | None) -> DatasetDict:
-    splits_path = Path(splits_dir)
-    train_examples = load_jsonl(splits_path / "train.jsonl")
-    print(f"Loaded train split: {len(train_examples)} examples")
-
-    if augmented_dir:
-        aug_path = Path(augmented_dir)
-        if aug_path.is_dir():
-            for jsonl_file in sorted(aug_path.glob("*.jsonl")):
-                extra = load_jsonl(jsonl_file)
-                train_examples.extend(extra)
-                print(f"Loaded augmented: {jsonl_file} ({len(extra)} examples)")
-        else:
-            print(f"Warning: augmented_dir {augmented_dir!r} not found, skipping.")
-
-    val_examples = load_jsonl(splits_path / "val.jsonl")
-    test_examples = load_jsonl(splits_path / "test.jsonl")
-
-    def to_hf_dict(examples: list[dict]) -> dict:
-        texts, labels = [], []
-        for ex in examples:
-            if ex.get("severity") not in label2id:
-                continue
-            texts.append(build_conversation_text(ex))
-            labels.append(label2id[ex["severity"]])
-        return {"text": texts, "labels": labels}
-
-    return DatasetDict({
-        "train": Dataset.from_dict(to_hf_dict(train_examples)),
-        "validation": Dataset.from_dict(to_hf_dict(val_examples)),
-        "test": Dataset.from_dict(to_hf_dict(test_examples)),
-    })
-
-
 def train(
     dataset_path: str,
     output_dir: str,
@@ -191,9 +132,9 @@ def train(
     alpha: float = 1.0,
     gamma: float = 2.0,
     focal_with_weights: bool = False,
-    augmented_dir: str | None = None,
 ):
-    ds = build_dataset(dataset_path, augmented_dir)
+    ds = load_from_disk(dataset_path)
+    ds = ds.rename_column("label", "labels")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -402,9 +343,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train severity classifier")
     parser.add_argument("--model_name", default="distilbert-base-uncased")
     parser.add_argument("--dataset_path", required=True,
-                        help="Path to merged_splits directory containing train/val/test.jsonl")
-    parser.add_argument("--augmented_dir", default="data/augmented",
-                        help="Directory of extra .jsonl files merged into train (default: data/augmented)")
+                        help="Path to pre-built HuggingFace DatasetDict (saved with save_to_disk)")
     parser.add_argument("--output_dir", default="models/classifiers/severity_conversation/",
                         help="Where to save checkpoints and artifacts")
     parser.add_argument("--lr", type=float, default=2e-5)
@@ -443,5 +382,4 @@ if __name__ == "__main__":
         alpha=args.alpha,
         gamma=args.gamma,
         focal_with_weights=args.focal_with_weights,
-        augmented_dir=args.augmented_dir,
     )

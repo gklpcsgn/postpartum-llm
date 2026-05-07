@@ -26,7 +26,8 @@ import re
 import time
 from pathlib import Path
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
@@ -101,11 +102,17 @@ def parse_json_response(text: str) -> list[dict]:
     return json.loads(text)
 
 
-def generate_batch(model, batch_size: int, retries: int = 3) -> list[dict]:
+def generate_batch(client, model_name: str, batch_size: int, retries: int = 3) -> list[dict]:
     prompt = GENERATION_PROMPT.format(batch_size=batch_size)
     for attempt in range(retries):
         try:
-            response = model.generate_content(prompt)
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                ),
+            )
             candidates = parse_json_response(response.text)
             if not isinstance(candidates, list):
                 raise ValueError("Response is not a JSON array")
@@ -136,11 +143,7 @@ def main():
     parser.add_argument("--rpm",       type=int, default=15, help="Max requests per minute")
     args = parser.parse_args()
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(
-        model_name=args.model,
-        system_instruction=SYSTEM_INSTRUCTION,
-    )
+    client = genai.Client(api_key=api_key)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -163,7 +166,7 @@ def main():
             batch_size = min(args.batch_size, remaining)
             print(f"[{collected}/{args.target}] Generating batch of {batch_size}...")
 
-            candidates = generate_batch(model, batch_size)
+            candidates = generate_batch(client, args.model, batch_size)
             accepted = 0
             for ex in candidates:
                 ok, reason = validate_example(ex)
