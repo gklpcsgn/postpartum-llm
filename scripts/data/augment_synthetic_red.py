@@ -139,7 +139,7 @@ def main():
     parser.add_argument("--target",    type=int, default=300, help="Number of examples to generate")
     parser.add_argument("--batch_size",type=int, default=10,  help="Examples per API call")
     parser.add_argument("--output",    default="data/augmented/synthetic_red.jsonl")
-    parser.add_argument("--model",     default="gemini-1.5-flash")
+    parser.add_argument("--model",     default="gemini-3.1-pro-preview")
     parser.add_argument("--rpm",       type=int, default=15, help="Max requests per minute")
     args = parser.parse_args()
 

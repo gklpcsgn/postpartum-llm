@@ -3,16 +3,21 @@
 
 .env
 
-# Model weights
-models/**/*.safetensors
-models/**/*.pt
-models/**/rng_state.pth
+# Model weights and training artifacts
+models/classifiers/
+models/generative/
 
 # Book PDFs and chunks
 data/books/
 
-# HuggingFace dataset cache
-data/severity/**/*.arrow
+# Augmented datasets (HuggingFace DatasetDict artifacts and generated data)
+data/augmented/
+
+# HuggingFace dataset cache and arrow files
+data/severity/
+
+# Experiment results, predictions, and judge scores
+results/
 
 # Large data files
 *.zip
@@ -25,4 +30,3 @@ __pycache__/
 
 # Logs
 *.log
-models/**/checkpoint-*/
